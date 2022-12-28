@@ -18,6 +18,9 @@ pragma solidity >=0.8.0;
 
 import "./FraxUnifiedFarmTemplate.sol";
 import "./ILockReceiver.sol";
+import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+import "lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
+import "../ERC20/EIP3009Like.sol";
 
 // -------------------- VARIES --------------------
 
@@ -638,6 +641,96 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
                 revert InsufficientAllowance();
             }
     }
+
+    /// Variables for permit
+    /// owner -> spender -> kekId -> nonce
+    mapping(address => mapping(address => mapping(bytes32 => uint256))) public kekNonce;
+    /// owner -> bytes32 transaction hash/nonce?
+ 
+
+    /**
+     * @notice Attempt to cancel an authorization
+     * @param authorizer    Authorizer's address
+     * @param nonce         Nonce of the authorization
+     * @param v             v of the signature
+     * @param r             r of the signature
+     * @param s             s of the signature
+     */
+   function cancelAuthorization(
+        address authorizer,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        _cancelAuthorization(authorizer, nonce, v, r, s);
+    }
+    
+    /**
+     * @notice Execute a transfer with a signed authorization
+     * @param from          Payer's address (Authorizer)
+     * @param to            Payee's address
+     * @param value         Amount to be transferred
+     * @param validAfter    The time after which this is valid (unix time)
+     * @param validBefore   The time before which this is valid (unix time)
+     * @param nonce         Unique nonce
+     * @param v             v of the signature
+     * @param r             r of the signature
+     * @param s             s of the signature
+     */
+    function transferWithAuthorization(
+        address from,
+        address to,
+        bytes32 source_kek_id,
+        uint256 value,
+        bytes32 destination_kek_id,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused notBlacklisted(from) notBlacklisted(to) {
+        _requireValidAuthorization(from, nonce, validAfter, validBefore);//, nonce, v, r, s);
+/// TODO This needs to include the components from: https://soliditydeveloper.com/erc721-permit
+//  todo todo todo like this:
+//  bytes32 hashStruct = keccak256(
+//     abi.encode(
+//         keccak256("Permit(address spender,uint256 tokenId,uint256 nonce,uint256 deadline)"),
+//         spender,
+//         tokenId,
+//         nonces[tokenId],
+//         deadline
+//     )
+// );
+
+        bytes memory data = abi.encode(
+            TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
+            from,
+            to,
+            value,
+            validAfter,
+            validBefore,
+            nonce
+        );
+
+        if(EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from) revert InvalidSignature();
+        _markAuthorizationAsUsed(from, nonce);
+
+        // _transferWithAuthorization(
+        //     from,
+        //     to,
+        //     value,
+        //     validAfter,
+        //     validBefore,
+        //     nonce,
+        //     v,
+        //     r,
+        //     s
+        // );
+        _safeTransferLocked(from, to, source_kek_id, transfer_amount, destination_kek_id);
+    }
+
 
     ///// Transfer Locks
     /// @dev called by the spender to transfer a lock position on behalf of the staker
