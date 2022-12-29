@@ -644,7 +644,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
 
     /// Variables for permit
     /// owner -> spender -> kekId -> nonce
-    mapping(address => mapping(address => mapping(bytes32 => uint256))) public kekNonce;
+    // mapping(address => mapping(address => mapping(bytes32 => uint256))) public kekNonce;
     /// owner -> bytes32 transaction hash/nonce?
  
 
@@ -662,7 +662,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused {
+    ) external {
         _cancelAuthorization(authorizer, nonce, v, r, s);
     }
     
@@ -678,7 +678,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
      * @param r             r of the signature
      * @param s             s of the signature
      */
-    function transferWithAuthorization(
+    function transferFromWithAuthorization(
         address from,
         address to,
         bytes32 source_kek_id,
@@ -691,43 +691,37 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         bytes32 r,
         bytes32 s
     ) external whenNotPaused notBlacklisted(from) notBlacklisted(to) {
-        _requireValidAuthorization(from, nonce, validAfter, validBefore);//, nonce, v, r, s);
-/// TODO This needs to include the components from: https://soliditydeveloper.com/erc721-permit
-//  todo todo todo like this:
-//  bytes32 hashStruct = keccak256(
-//     abi.encode(
-//         keccak256("Permit(address spender,uint256 tokenId,uint256 nonce,uint256 deadline)"),
-//         spender,
-//         tokenId,
-//         nonces[tokenId],
-//         deadline
-//     )
-// );
+        
+        // check that time range is valid
+        _requireValidAuthorization(from, source_kek_id, nonce, validAfter, validBefore);//, nonce, v, r, s);
 
+        /// TODO This needs to include the components from: https://soliditydeveloper.com/erc721-permit
+        /// Should check & call like this: https://github.com/soliditylabs/ERC721-Permit/blob/master/contracts/ERC721Permit.sol
         bytes memory data = abi.encode(
             TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
             from,
-            to,
+            msg.sender, //spender
+            source_kek_id,
             value,
             validAfter,
             validBefore,
             nonce
         );
-
-        if(EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from) revert InvalidSignature();
+        // check that the signature is valid
+        bool isValidEOASignature = isApproved(EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == from);
+        /// TODO or use SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s);
+        if(
+            isValidEOASignature
+            ||
+            _isValidContractERC1271Signature(ownerOf(tokenId), hash, signature) 
+            ||
+            _isValidContractERC1271Signature(getApproved(tokenId), hash, signature),
+        ) revert InvalidSignature();
+        
+        // mark the authorization as used
         _markAuthorizationAsUsed(from, nonce);
 
-        // _transferWithAuthorization(
-        //     from,
-        //     to,
-        //     value,
-        //     validAfter,
-        //     validBefore,
-        //     nonce,
-        //     v,
-        //     r,
-        //     s
-        // );
+        // execute the transfer
         _safeTransferLocked(from, to, source_kek_id, transfer_amount, destination_kek_id);
     }
 

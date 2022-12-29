@@ -179,6 +179,7 @@ abstract contract EIP2612 is AbstractFiatTokenV2, EIP712Domain {
     function _permit(
         address owner,
         address spender,
+        bytes32 kek_id,
         uint256 value,
         uint256 deadline,
         uint8 v,
@@ -192,6 +193,7 @@ abstract contract EIP2612 is AbstractFiatTokenV2, EIP712Domain {
             PERMIT_TYPEHASH,
             owner,
             spender,
+            kek_id,
             value,
             _permitNonces[owner]++,
             deadline
@@ -219,13 +221,13 @@ error CannotBeZeroAddress();
  * accessible functions, optionally adding modifiers where necessary
  */
 abstract contract EIP3009 is AbstractFiatTokenV2, EIP712Domain {
-    // keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
+    // keccak256("TransferWithAuthorization(address from,address to,bytes32 kek_id,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
     bytes32
-        public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH = 0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267;
+        public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH = 0x4e52caa8705719b888798629ad0809986a729e46418fcc83c9a2b51a015ed200;
 
-    // keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
-    // bytes32
-    //     public constant RECEIVE_WITH_AUTHORIZATION_TYPEHASH = 0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8;
+    // keccak256("TransferFromWithAuthorization(address from,address to,address spender,bytes32 kek_id,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
+    bytes32
+        public constant TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH = 0x71d816292eec7ccc42ef58e2f15041ec70d8d054f05f4510f5bae7df4c65e8ed;
 
     // keccak256("CancelAuthorization(address authorizer,bytes32 nonce)")
     bytes32
@@ -273,6 +275,8 @@ abstract contract EIP3009 is AbstractFiatTokenV2, EIP712Domain {
     // function _transferWithAuthorization(
     //     address from,
     //     address to,
+    //     address spender,
+    //     bytes32 kek_id,
     //     uint256 value,
     //     uint256 validAfter,
     //     uint256 validBefore,
@@ -292,6 +296,22 @@ abstract contract EIP3009 is AbstractFiatTokenV2, EIP712Domain {
     //         validBefore,
     //         nonce
     //     );
+    //     /// TODO TODO example here: https://github.com/soliditylabs/ERC721-Permit/blob/master/contracts/ERC721Permit.sol
+    //     /// Based on: https://soliditydeveloper.com/erc721-permit
+    //     /// Also this: https://github.com/Uniswap/v3-periphery/blob/main/contracts/base/ERC721Permit.sol
+    //     /// There's COWswap's orders methodology: https://github.com/nlordell/dappcon-2022-smart-orders/blob/main/contracts/GATOrders.sol
+    //     ///     Part of COWswap's order parameters: https://github.com/nlordell/dappcon-2022-smart-orders/blob/main/contracts/vendored/GPv2Order.sol
+    //     /// And this breakdown of 1271: https://www.youtube.com/watch?v=sc1x_du6UXk
+    //     // bytes32 hashStruct = keccak256(
+    //     //     abi.encode(
+    //     //         keccak256("Permit(address spender,uint256 tokenId,uint256 nonce,uint256 deadline)"),
+    //     //         spender,
+    //     //         kek_id,
+    //     //         nonce,
+    //     //         validAfter,
+    //     //         validBefore
+    //     //     )
+    //     // );
     //     // require(
     //     //     EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == from,
     //     //     "FiatTokenV2: invalid signature"
@@ -300,7 +320,62 @@ abstract contract EIP3009 is AbstractFiatTokenV2, EIP712Domain {
         
     //     _markAuthorizationAsUsed(from, nonce);
     //     _transfer(from, to, value);
-    // }
+    // }    
+    /**
+     * @notice Execute a transfer with a signed authorization
+     * @param from          Payer's address (Authorizer)
+     * @param spender       Spender's address
+     * @param kek_id        Origination kek_id
+     * @param value         Amount to be transferred
+     * @param validAfter    The time after which this is valid (unix time)
+     * @param validBefore   The time before which this is valid (unix time)
+     * @param nonce         Unique nonce
+     * @param v             v of the signature
+     * @param r             r of the signature
+     * @param s             s of the signature
+     */
+    function _transferFromWithAuthorization(
+        address from,
+        address spender,
+        bytes32 kek_id,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
+        // _requireValidAuthorization(from, nonce, validAfter, validBefore);
+
+        bytes memory data = abi.encode(
+            TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH,
+            from,
+            spender,
+            kek_id,
+            value,
+            validAfter,
+            validBefore,
+            nonce
+        );
+        /// TODO TODO example here: https://github.com/soliditylabs/ERC721-Permit/blob/master/contracts/ERC721Permit.sol
+        /// Based on: https://soliditydeveloper.com/erc721-permit
+        /// Also this: https://github.com/Uniswap/v3-periphery/blob/main/contracts/base/ERC721Permit.sol
+        /// There's COWswap's orders methodology: https://github.com/nlordell/dappcon-2022-smart-orders/blob/main/contracts/GATOrders.sol
+        ///     Part of COWswap's order parameters: https://github.com/nlordell/dappcon-2022-smart-orders/blob/main/contracts/vendored/GPv2Order.sol
+        /// And this breakdown of 1271: https://www.youtube.com/watch?v=sc1x_du6UXk
+
+        // require(
+        //     EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == from,
+        //     "FiatTokenV2: invalid signature"
+        // );
+        if(EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from) revert InvalidSignature();
+        
+        _markAuthorizationAsUsed(from, nonce);
+        //_transfer(from, to, value);
+        //_safeTransferLocked
+        /// TODO if this didn't fail, proceed on with transfer logic
+    }
 
     // /**
     //  * @notice Receive a transfer with a signed authorization from the payer
