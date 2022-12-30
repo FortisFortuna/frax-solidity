@@ -18,9 +18,10 @@ pragma solidity >=0.8.0;
 
 import "./FraxUnifiedFarmTemplate.sol";
 import "./ILockReceiver.sol";
-// import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
-import "lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
+import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+// import "lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
 // import "../ERC20/EIP3009Like.sol";
+import "../ERC20/SignatureCheckerFlattened.sol";
 
 // -------------------- VARIES --------------------
 
@@ -76,6 +77,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     error InvalidTimestamp();
     error InvalidSignature();
     error AuthorizationUsedOrCanceled();
+    error InsufficientSpendableAmount();
 
     /* ========== STATE VARIABLES ========== */
 
@@ -137,7 +139,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     mapping(bytes32 => uint256) public nonceSpent;
 
     // Signature related variables
-    bytes32 public constant DOMAIN_SEPARATOR;
+    bytes32 public immutable DOMAIN_SEPARATOR;
 
     
     /* ========== CONSTRUCTOR ========== */
@@ -671,6 +673,10 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     bytes32
         public constant TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH = 0x71d816292eec7ccc42ef58e2f15041ec70d8d054f05f4510f5bae7df4c65e8ed;
 
+    // keccak256("CancelAuthorization(address authorizer,bytes32 nonce)")
+    bytes32
+        public constant CANCEL_AUTHORIZATION_TYPEHASH = 0x158b0a9edf7a828aad02f63cd515c68ef2f50ba807396f6d12842833a1597429;
+
     /**
      * @notice Attempt to cancel an authorization
      * @param authorizer    Authorizer's address
@@ -691,12 +697,60 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     }
     
     /**
+     * @notice Attempt to cancel an authorization
+     * @param authorizer    Authorizer's address
+     * @param nonce         Nonce of the authorization
+     * @param v             v of the signature
+     * @param r             r of the signature
+     * @param s             s of the signature
+     */
+    function _cancelAuthorization(
+        address authorizer,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
+        _requireUnusedAuthorization(authorizer, nonce);
+
+        bytes memory structHash = abi.encode(
+            CANCEL_AUTHORIZATION_TYPEHASH,
+            authorizer,
+            nonce
+        );
+        // require(
+        //     EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == authorizer,
+        //     "FiatTokenV2: invalid signature"
+        // );
+
+        bytes32 data = ECDSA.toTypedDataHash(DOMAIN_SEPARATOR, structHash);
+
+        // if(ECDSA.recover(DOMAIN_SEPARATOR, v, r, s, data) != authorizer) revert InvalidSignature();
+        if(!SignatureChecker.isValidSignatureNow(authorizer, keccak256(data), v, r, s)) revert InvalidSignature();
+        
+        authorizationStates[authorizer][nonce] = true;
+        emit AuthorizationCanceled(authorizer, nonce);
+    }
+
+    /**
+     * @notice Check that an authorization is unused
+     * @param authorizer    Authorizer's address
+     * @param nonce         Nonce of the authorization
+     */
+    function _requireUnusedAuthorization(address authorizer, bytes32 nonce)
+        private
+        view
+    {
+        if(authorizationStates[authorizer][nonce]) revert AuthorizationUsedOrCanceled();
+    }
+
+    /**
      * @notice Execute a transfer with a signed authorization
-     * @param from          Payer's address (Authorizer)
+     * @param from          Payer's address (from)
      * @param to            Payee's address
-     * @param value         Amount to be transferred
-     * @param validAfter    The time after which this is valid (unix time)
-     * @param validBefore   The time before which this is valid (unix time)
+     * @param authorizedAmount         Amount to be transferred
+     * param validAfter     The time after which this is valid (unix time)
+     * @param deadline      The time before which this is valid (unix time)
      * @param nonce         Unique nonce
      * @param v             v of the signature
      * @param r             r of the signature
@@ -709,60 +763,75 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         uint256 authorizedAmount,
         uint256 transferAmount,
         bytes32 destination_kek_id,
-        uint256 validAfter,
-        uint256 validBefore,
+        // uint256 validAt,
+        uint256 deadline,
         bytes32 nonce,
         uint8 v,
         bytes32 r,
         bytes32 s
     ) external {
         // check that time range is valid
-        if(block.timestamp <= validAfter) revert InvalidTimestamp();
-        if(block.timestamp >= validBefore) revert InvalidTimestamp();
+        // if(block.timestamp < validAt || block.timestamp > validBefore) revert InvalidTimestamp();
+        if(block.timestamp > deadline) revert InvalidTimestamp();
 
         // check that the authorization has not been used or canceled
-        if(authorizationStates[authorizer][nonce]) revert AuthorizationUsedOrCanceled();
+        // if(authorizationStates[from][nonce]) revert AuthorizationUsedOrCanceled();
+        _requireUnusedAuthorization(from, nonce);
 
         // check if a portion of the nonce has already been transferred
         //   if not fully spent, add it to the amount spent
         //   or if it is the full amount, use the nonce
         //   otherwise, there isn't enough nonce-allowance available, so revert
         if (authorizedAmount == transferAmount) {
-            authorizationStates[authorizer][nonce] = true;
-            emit AuthorizationUsed(nonce, authorizedAmount, authorizationStates[authorizer][nonce]);
+            authorizationStates[from][nonce] = true;
+            emit AuthorizationUsed(from, nonce, authorizedAmount, authorizationStates[from][nonce]);
         } else if (authorizedAmount > transferAmount) {
             nonceSpent[nonce] += transferAmount;
-            emit AuthorizationUsed(nonce, authorizedAmount, authorizationStates[authorizer][nonce]);
+            emit AuthorizationUsed(from, nonce, authorizedAmount, authorizationStates[from][nonce]);
         } else {
             // if (nonceSpent[nonce] + transferAmount > authorizedAmount) {
             revert InsufficientSpendableAmount();
         }
         /// TODO the above checks could be bundled in to the isApproved function if we want
         //isApproved(from, source_kek_id, transferAmount, authorizedAmount, nonce);
-
+        // require(
+        //     _encodeAuthorizationCheck(
+        //         TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH,
+        //         from,
+        //         msg.sender, //spender
+        //         source_kek_id,
+        //         authorizedAmount,
+        //         // validAt,
+        //         deadline,
+        //         nonce,
+        //         v,
+        //         r,
+        //         s
+        //     )
+        // );
         // create the hashed struct of the signed authorization message
-        bytes memory structHash = abi.encode(
+        bytes32 structHash = keccak256(abi.encode(
             TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH,
             from,
             msg.sender, //spender
             source_kek_id,
             authorizedAmount,
-            validAfter,
-            validBefore,
+            // validAt,
+            deadline,
             nonce
-        );
+        ));
 
-        bytes memory data = ECDSA.toTypedDataHash(_domainSeparatorV4(), structHash);
+        bytes memory data = ECDSA.toTypedDataHash(DOMAIN_SEPARATOR, structHash);
 
-        // // check that the signature is valid
-        // if(
-        //     // EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from
-        //     // &&
-        //     // this should
-        //     !SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)
-        // ) revert InvalidSignature();
+        // check that the signature is valid
+        if(
+            EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from
+            &&
+            // this should
+            !SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)
+        ) revert InvalidSignature();
         /// TODO this should be the same as the above commented. Does this work for all types of signatures?
-        if(!SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)) revert InvalidSignature();
+        // if(!SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)) revert InvalidSignature();
         
 
         // execute the transfer
@@ -945,7 +1014,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     
     event Approval(address indexed staker, address indexed spender, bytes32 indexed kek_id, uint256 amount);
     event ApprovalForAll(address indexed owner, address indexed spender, bool approved);
-    event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
+    event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce, uint256 amountSpent, bool authorizationState);
     event AuthorizationCanceled(
         address indexed authorizer,
         bytes32 indexed nonce
