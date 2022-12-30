@@ -18,9 +18,9 @@ pragma solidity >=0.8.0;
 
 import "./FraxUnifiedFarmTemplate.sol";
 import "./ILockReceiver.sol";
-import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+// import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 import "lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
-import "../ERC20/EIP3009Like.sol";
+// import "../ERC20/EIP3009Like.sol";
 
 // -------------------- VARIES --------------------
 
@@ -73,6 +73,9 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     error CannotBeZero();
     error AllowanceIsZero();
     error InvalidChainlinkPrice();
+    error InvalidTimestamp();
+    error InvalidSignature();
+    error AuthorizationUsedOrCanceled();
 
     /* ========== STATE VARIABLES ========== */
 
@@ -130,6 +133,11 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     mapping(address => mapping(bytes32 => mapping(address => uint256))) public kekAllowance;
     // staker => spender => bool (true if approved)
     mapping(address => mapping(address => bool)) public spenderApprovalForAllLocks;
+    // spending nonce to amount spent
+    mapping(bytes32 => uint256) public nonceSpent;
+
+    // Signature related variables
+    bytes32 public constant DOMAIN_SEPARATOR;
 
     
     /* ========== CONSTRUCTOR ========== */
@@ -145,7 +153,17 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     ) 
     FraxUnifiedFarmTemplate(_owner, _rewardTokens, _rewardManagers, _rewardRatesManual, _gaugeControllers, _rewardDistributors)
     {
-
+        DOMAIN_SEPARATOR =             
+            keccak256(
+                abi.encode(
+                    // keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+                    0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f,
+                    keccak256(bytes("FraxUnifiedFarm_ERC20_TRANSFERRABLE")),
+                    keccak256(bytes("1")),
+                    block.chainid,
+                    address(this)
+                )
+            );
         // -------------------- VARIES (USE CHILD FOR LOGIC) --------------------
 
         // Fraxswap
@@ -647,6 +665,11 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     // mapping(address => mapping(address => mapping(bytes32 => uint256))) public kekNonce;
     /// owner -> bytes32 transaction hash/nonce?
  
+    mapping(address => mapping(bytes32 => bool)) public authorizationStates;
+
+    // keccak256("TransferFromWithAuthorization(address from,address to,address spender,bytes32 kek_id,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
+    bytes32
+        public constant TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH = 0x71d816292eec7ccc42ef58e2f15041ec70d8d054f05f4510f5bae7df4c65e8ed;
 
     /**
      * @notice Attempt to cancel an authorization
@@ -664,6 +687,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         bytes32 s
     ) external {
         _cancelAuthorization(authorizer, nonce, v, r, s);
+        emit AuthorizationCanceled(authorizer, nonce);
     }
     
     /**
@@ -682,7 +706,8 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         address from,
         address to,
         bytes32 source_kek_id,
-        uint256 value,
+        uint256 authorizedAmount,
+        uint256 transferAmount,
         bytes32 destination_kek_id,
         uint256 validAfter,
         uint256 validBefore,
@@ -690,39 +715,58 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external whenNotPaused notBlacklisted(from) notBlacklisted(to) {
-        
+    ) external {
         // check that time range is valid
-        _requireValidAuthorization(from, source_kek_id, nonce, validAfter, validBefore);//, nonce, v, r, s);
+        if(block.timestamp <= validAfter) revert InvalidTimestamp();
+        if(block.timestamp >= validBefore) revert InvalidTimestamp();
 
-        /// TODO This needs to include the components from: https://soliditydeveloper.com/erc721-permit
-        /// Should check & call like this: https://github.com/soliditylabs/ERC721-Permit/blob/master/contracts/ERC721Permit.sol
-        bytes memory data = abi.encode(
-            TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
+        // check that the authorization has not been used or canceled
+        if(authorizationStates[authorizer][nonce]) revert AuthorizationUsedOrCanceled();
+
+        // check if a portion of the nonce has already been transferred
+        //   if not fully spent, add it to the amount spent
+        //   or if it is the full amount, use the nonce
+        //   otherwise, there isn't enough nonce-allowance available, so revert
+        if (authorizedAmount == transferAmount) {
+            authorizationStates[authorizer][nonce] = true;
+            emit AuthorizationUsed(nonce, authorizedAmount, authorizationStates[authorizer][nonce]);
+        } else if (authorizedAmount > transferAmount) {
+            nonceSpent[nonce] += transferAmount;
+            emit AuthorizationUsed(nonce, authorizedAmount, authorizationStates[authorizer][nonce]);
+        } else {
+            // if (nonceSpent[nonce] + transferAmount > authorizedAmount) {
+            revert InsufficientSpendableAmount();
+        }
+        /// TODO the above checks could be bundled in to the isApproved function if we want
+        //isApproved(from, source_kek_id, transferAmount, authorizedAmount, nonce);
+
+        // create the hashed struct of the signed authorization message
+        bytes memory structHash = abi.encode(
+            TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH,
             from,
             msg.sender, //spender
             source_kek_id,
-            value,
+            authorizedAmount,
             validAfter,
             validBefore,
             nonce
         );
-        // check that the signature is valid
-        bool isValidEOASignature = isApproved(EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == from);
-        /// TODO or use SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s);
-        if(
-            isValidEOASignature
-            ||
-            _isValidContractERC1271Signature(ownerOf(tokenId), hash, signature) 
-            ||
-            _isValidContractERC1271Signature(getApproved(tokenId), hash, signature),
-        ) revert InvalidSignature();
+
+        bytes memory data = ECDSA.toTypedDataHash(_domainSeparatorV4(), structHash);
+
+        // // check that the signature is valid
+        // if(
+        //     // EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from
+        //     // &&
+        //     // this should
+        //     !SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)
+        // ) revert InvalidSignature();
+        /// TODO this should be the same as the above commented. Does this work for all types of signatures?
+        if(!SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)) revert InvalidSignature();
         
-        // mark the authorization as used
-        _markAuthorizationAsUsed(from, nonce);
 
         // execute the transfer
-        _safeTransferLocked(from, to, source_kek_id, transfer_amount, destination_kek_id);
+        _safeTransferLocked(from, to, source_kek_id, transferAmount, destination_kek_id);
     }
 
 
@@ -898,7 +942,13 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
     event StakeLocked(address indexed user, uint256 amount, uint256 secs, bytes32 kek_id, address source_address);
     event WithdrawLocked(address indexed user, uint256 liquidity, bytes32 kek_id, address destination_address);
     event TransferLocked(address indexed sender_address, address indexed destination_address, uint256 amount_transferred, bytes32 source_kek_id, bytes32 destination_kek_id);
+    
     event Approval(address indexed staker, address indexed spender, bytes32 indexed kek_id, uint256 amount);
     event ApprovalForAll(address indexed owner, address indexed spender, bool approved);
+    event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
+    event AuthorizationCanceled(
+        address indexed authorizer,
+        bytes32 indexed nonce
+    );
 
 }
