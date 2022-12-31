@@ -18,7 +18,7 @@ pragma solidity >=0.8.0;
 
 import "./FraxUnifiedFarmTemplate.sol";
 import "./ILockReceiver.sol";
-import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+// import "lib/openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
 // import "lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
 // import "../ERC20/EIP3009Like.sol";
 import "../ERC20/SignatureCheckerFlattened.sol";
@@ -681,18 +681,19 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
      * @notice Attempt to cancel an authorization
      * @param authorizer    Authorizer's address
      * @param nonce         Nonce of the authorization
-     * @param v             v of the signature
-     * @param r             r of the signature
-     * @param s             s of the signature
+     * param v             v of the signature
+     * param r             r of the signature
+     * param s             s of the signature
      */
    function cancelAuthorization(
         address authorizer,
         bytes32 nonce,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
+        bytes calldata signature
+        // uint8 v,
+        // bytes32 r,
+        // bytes32 s
     ) external {
-        _cancelAuthorization(authorizer, nonce, v, r, s);
+        _cancelAuthorization(authorizer, nonce, signature);// v, r, s);
         emit AuthorizationCanceled(authorizer, nonce);
     }
     
@@ -700,34 +701,44 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
      * @notice Attempt to cancel an authorization
      * @param authorizer    Authorizer's address
      * @param nonce         Nonce of the authorization
-     * @param v             v of the signature
-     * @param r             r of the signature
-     * @param s             s of the signature
+     * param v             v of the signature
+     * param r             r of the signature
+     * param s             s of the signature
      */
     function _cancelAuthorization(
         address authorizer,
         bytes32 nonce,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
+        bytes calldata signature
+        // uint8 v,
+        // bytes32 r,
+        
+        // bytes32 s
     ) internal {
         _requireUnusedAuthorization(authorizer, nonce);
 
-        bytes memory structHash = abi.encode(
+        bytes32 structHash = keccak256(abi.encode(
             CANCEL_AUTHORIZATION_TYPEHASH,
             authorizer,
             nonce
-        );
+        ));
         // require(
         //     EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) == authorizer,
         //     "FiatTokenV2: invalid signature"
         // );
 
-        bytes32 data = ECDSA.toTypedDataHash(DOMAIN_SEPARATOR, structHash);
+        // bytes32 data = ECDSA.toTypedDataHash(
+        //     DOMAIN_SEPARATOR, 
+        //     keccak256(abi.encode(
+        //         CANCEL_AUTHORIZATION_TYPEHASH,
+        //         authorizer,
+        //         nonce
+        //     ))
+        // );
 
         // if(ECDSA.recover(DOMAIN_SEPARATOR, v, r, s, data) != authorizer) revert InvalidSignature();
-        if(!SignatureChecker.isValidSignatureNow(authorizer, keccak256(data), v, r, s)) revert InvalidSignature();
-        
+        // if(!SignatureChecker.isValidSignatureNow(authorizer, keccak256(data), v, r, s)) revert InvalidSignature();
+        if(!SignatureChecker.isValidSignatureNow(authorizer, structHash, signature)) revert InvalidSignature();
+
         authorizationStates[authorizer][nonce] = true;
         emit AuthorizationCanceled(authorizer, nonce);
     }
@@ -752,9 +763,9 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
      * param validAfter     The time after which this is valid (unix time)
      * @param deadline      The time before which this is valid (unix time)
      * @param nonce         Unique nonce
-     * @param v             v of the signature
-     * @param r             r of the signature
-     * @param s             s of the signature
+     * param v             v of the signature
+     * param r             r of the signature
+     * param s             s of the signature
      */
     function transferFromWithAuthorization(
         address from,
@@ -766,9 +777,10 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         // uint256 validAt,
         uint256 deadline,
         bytes32 nonce,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
+        bytes calldata signature
+        // uint8 v,
+        // bytes32 r,
+        // bytes32 s
     ) external {
         // check that time range is valid
         // if(block.timestamp < validAt || block.timestamp > validBefore) revert InvalidTimestamp();
@@ -809,6 +821,7 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
         //         s
         //     )
         // );
+
         // create the hashed struct of the signed authorization message
         bytes32 structHash = keccak256(abi.encode(
             TRANSFER_FROM_WITH_AUTHORIZATION_TYPEHASH,
@@ -821,17 +834,18 @@ contract FraxUnifiedFarm_ERC20 is FraxUnifiedFarmTemplate {
             nonce
         ));
 
-        bytes memory data = ECDSA.toTypedDataHash(DOMAIN_SEPARATOR, structHash);
+        // bytes32 data = ECDSA.toTypedDataHash(DOMAIN_SEPARATOR, structHash);
 
         // check that the signature is valid
-        if(
-            EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from
-            &&
-            // this should
-            !SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)
-        ) revert InvalidSignature();
+        // if(
+        //     EIP712.recover(DOMAIN_SEPARATOR, v, r, s, data) != from
+        //     &&
+        //     // this should
+        //     !SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)
+        // ) revert InvalidSignature();
         /// TODO this should be the same as the above commented. Does this work for all types of signatures?
-        // if(!SignatureChecker.isValidSignatureNow(from, keccak256(data), v, r, s)) revert InvalidSignature();
+        // if(!SignatureChecker.isValidSignatureNow(from, data, v, r, s)) revert InvalidSignature();
+        if(!SignatureChecker.isValidSignatureNow(from, structHash, signature)) revert InvalidSignature();
         
 
         // execute the transfer
